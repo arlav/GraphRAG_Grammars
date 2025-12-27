@@ -38,7 +38,7 @@ Based on analysis of existing code and documentation, this project will implemen
 ## System Architecture
 
 - use pydantic
-- use topologicpy 
+- use topologicpy - PRIORITISE the use of Topologicpy data structures 
 - use kuzu
 - use streamlit
 

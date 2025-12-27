@@ -11,253 +11,115 @@ Philosophy:
 - Graph and shapes are dual representations of the same configuration
 - Transformations are bidirectional (can be composed, reversed)
 - Rules are pure functions (no side effects)
-- Immutable data structures (functional approach)
+- TopologicPy primitives throughout (Cluster + Graph)
+
+ARCHITECTURE (REFACTORED):
+- Uses TopologicPy Cluster (for Face geometries)
+- Uses TopologicPy Graph (for topology - vertices at centroids, edges for adjacencies)
+- No custom Rectangle classes - all geometry is Face objects
+- All metadata in TopologicPy Dictionary objects
 """
 
-from dataclasses import dataclass, field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Tuple, Dict, Callable, Optional, Any
-from collections import deque
-import networkx as nx
+from dataclasses import dataclass, field
 
-from .shapes import Rectangle, Point, merge_rectangles_bounding_box
+from topologicpy.Cluster import Cluster
+from topologicpy.Graph import Graph
+from topologicpy.Face import Face
+from topologicpy.Vertex import Vertex
+from topologicpy.Edge import Edge
+from topologicpy.Topology import Topology
+
+from .topologic_helpers import (
+    rectangular_face,
+    square_face,
+    get_metadata,
+    set_metadata,
+    get_all_metadata,
+    face_centroid,
+    faces_adjacent,
+    faces_overlap,
+    face_area,
+    faces_bounding_box,
+    graph_from_faces_and_adjacencies,
+    vertex_coordinates,
+)
 
 
 # =============================================================================
 # GRAPH-SHAPE DUAL REPRESENTATION
 # =============================================================================
 
-@dataclass
-class GraphShape:
+class GraphShape(BaseModel):
     """
     Dual representation: topology (graph) + geometry (shapes).
 
     This is the fundamental data structure in our grammar system.
     Every configuration has BOTH a graph and shapes, which must stay consistent.
 
+    REFACTORED ARCHITECTURE:
+    - cluster: Cluster of Face objects (room geometries)
+    - graph: Graph with vertices at room centroids, edges for adjacencies
+
+    All geometry is stored as TopologicPy Faces, all topology as TopologicPy Graph.
+    No custom classes, no networkx dependency.
+
     Attributes:
-        shapes: Dictionary mapping node_id → Rectangle
-        edges: List of (node_id_a, node_id_b) tuples representing adjacencies
-        metadata: Optional global metadata
+        cluster: Cluster of Faces (room geometries)
+        graph: Graph connecting room centroids (topology)
 
     Invariants:
-        - Every node in edges must have a corresponding shape
-        - Adjacent nodes in graph should have adjacent shapes (share boundary)
-        - No overlapping shapes (except possibly at boundaries)
+        - Every graph vertex has metadata with 'label' key matching a Face
+        - Adjacent vertices in graph should have adjacent Faces (share boundary)
+        - No overlapping Faces (except possibly at boundaries)
 
     Examples:
-        >>> # 2x2 grid
-        >>> shapes = {
-        ...     'n0': Rectangle(5, 5, Point(0, 0)),
-        ...     'n1': Rectangle(5, 5, Point(5, 0)),
-        ...     'n2': Rectangle(5, 5, Point(0, 5)),
-        ...     'n3': Rectangle(5, 5, Point(5, 5))
-        ... }
-        >>> edges = [('n0', 'n1'), ('n0', 'n2'), ('n1', 'n3'), ('n2', 'n3')]
-        >>> gs = GraphShape(shapes, edges)
-        >>> gs.num_nodes()
-        4
+        >>> # Create 2x2 grid
+        >>> faces = [
+        ...     rectangular_face(5, 5, origin=(0, 0), label="n0"),
+        ...     rectangular_face(5, 5, origin=(5, 0), label="n1"),
+        ...     rectangular_face(5, 5, origin=(0, 5), label="n2"),
+        ...     rectangular_face(5, 5, origin=(5, 5), label="n3"),
+        ... ]
+        >>> adjacencies = [("n0", "n1"), ("n0", "n2"), ("n1", "n3"), ("n2", "n3")]
+        >>> gs = GraphShape.from_faces_and_adjacencies(faces, adjacencies)
         >>> gs.total_area()
         100.0
     """
-    shapes: Dict[str, Rectangle]
-    edges: List[Tuple[str, str]]
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        """Validate consistency."""
-        # Check all edges reference existing nodes
-        all_nodes = set(self.shapes.keys())
-        for a, b in self.edges:
-            if a not in all_nodes:
-                raise ValueError(f"Edge references non-existent node: {a}")
-            if b not in all_nodes:
-                raise ValueError(f"Edge references non-existent node: {b}")
+    cluster: Any  # TopologicPy Cluster (from topologic_core)
+    graph: Any    # TopologicPy Graph (from topologic_core)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # -------------------------------------------------------------------------
     # Basic Queries
     # -------------------------------------------------------------------------
 
+    def faces(self) -> List[Face]:
+        """Get all faces from cluster."""
+        return Cluster.Faces(self.cluster)
+
+    def vertices(self) -> List[Vertex]:
+        """Get all graph vertices (at room centroids)."""
+        return Graph.Vertices(self.graph)
+
+    def edges(self) -> List[Edge]:
+        """Get all graph edges (room adjacencies)."""
+        return Graph.Edges(self.graph)
+
     def num_nodes(self) -> int:
-        """Number of nodes (shapes)."""
-        return len(self.shapes)
+        """Number of nodes (faces)."""
+        return len(self.faces())
 
     def num_edges(self) -> int:
         """Number of edges (adjacencies)."""
-        return len(self.edges)
+        return len(self.edges())
 
     def total_area(self) -> float:
         """Total area of all shapes."""
-        return sum(rect.area() for rect in self.shapes.values())
-
-    def get_neighbors(self, node_id: str) -> List[str]:
-        """Get all nodes adjacent to given node."""
-        neighbors = []
-        for a, b in self.edges:
-            if a == node_id:
-                neighbors.append(b)
-            elif b == node_id:
-                neighbors.append(a)
-        return neighbors
-
-    def degree(self, node_id: str) -> int:
-        """Degree of node (number of neighbors)."""
-        return len(self.get_neighbors(node_id))
-
-    def is_connected(self) -> bool:
-        """Check if graph is connected (all nodes reachable from any node)."""
-        if not self.shapes:
-            return True
-
-        # BFS from first node
-        visited = set()
-        queue = deque([next(iter(self.shapes.keys()))])
-        visited.add(queue[0])
-
-        while queue:
-            current = queue.popleft()
-            for neighbor in self.get_neighbors(current):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append(neighbor)
-
-        return len(visited) == self.num_nodes()
-
-    # -------------------------------------------------------------------------
-    # NetworkX Integration
-    # -------------------------------------------------------------------------
-
-    def to_networkx(self) -> nx.Graph:
-        """
-        Convert to NetworkX graph for analysis.
-
-        Adds node attributes: pos (centroid), width, height, area
-        """
-        G = nx.Graph()
-
-        for node_id, rect in self.shapes.items():
-            centroid = rect.centroid()
-            G.add_node(
-                node_id,
-                pos=(centroid.x, centroid.y),
-                width=rect.width,
-                height=rect.height,
-                area=rect.area(),
-                **rect.metadata
-            )
-
-        for a, b in self.edges:
-            G.add_edge(a, b)
-
-        return G
-
-    # -------------------------------------------------------------------------
-    # Validation
-    # -------------------------------------------------------------------------
-
-    def validate(self, tolerance: float = 0.1) -> Tuple[bool, List[str]]:
-        """
-        Validate graph-shape consistency.
-
-        Returns:
-            Tuple of (is_valid, list_of_issues)
-        """
-        issues = []
-
-        # Check 1: All edges reference existing nodes
-        for a, b in self.edges:
-            if a not in self.shapes:
-                issues.append(f"Edge references non-existent node: {a}")
-            if b not in self.shapes:
-                issues.append(f"Edge references non-existent node: {b}")
-
-        # Check 2: Graph is connected
-        if not self.is_connected():
-            issues.append("Graph is not connected (has multiple components)")
-
-        # Check 3: No overlapping shapes
-        overlaps = self.find_overlaps(tolerance)
-        if overlaps:
-            issues.append(f"Found {len(overlaps)} overlapping shape pairs")
-
-        # Check 4: Adjacent nodes have adjacent shapes
-        non_adjacent = []
-        for a, b in self.edges:
-            rect_a = self.shapes[a]
-            rect_b = self.shapes[b]
-            if not rect_a.is_adjacent_to(rect_b, tolerance):
-                non_adjacent.append((a, b))
-
-        if non_adjacent:
-            issues.append(f"Found {len(non_adjacent)} edges without geometric adjacency")
-
-        # Check 5: No isolated nodes (all nodes have at least one edge)
-        isolated = [node_id for node_id in self.shapes.keys() if self.degree(node_id) == 0]
-        if isolated:
-            issues.append(f"Found {len(isolated)} isolated nodes: {isolated}")
-
-        is_valid = len(issues) == 0
-        return (is_valid, issues)
-
-    def validate_dict(self, tolerance: float = 0.1) -> Dict[str, bool]:
-        """
-        Validate graph-shape consistency (dictionary format).
-
-        Returns:
-            Dictionary of validation checks and their results
-        """
-        is_valid, issues = self.validate(tolerance)
-
-        return {
-            'all_edges_valid': not any('non-existent node' in issue for issue in issues),
-            'graph_connected': not any('not connected' in issue for issue in issues),
-            'no_overlaps': not any('overlapping' in issue for issue in issues),
-            'adjacencies_valid': not any('without geometric adjacency' in issue for issue in issues),
-            'no_isolated_nodes': not any('isolated nodes' in issue for issue in issues)
-        }
-
-    def find_overlaps(self, tolerance: float = 0.1) -> List[Tuple[str, str]]:
-        """
-        Find all pairs of overlapping shapes.
-
-        Returns:
-            List of (node_id_a, node_id_b) tuples for overlapping shapes
-        """
-        overlaps = []
-        nodes = list(self.shapes.keys())
-
-        for i, node_a in enumerate(nodes):
-            for node_b in nodes[i+1:]:
-                rect_a = self.shapes[node_a]
-                rect_b = self.shapes[node_b]
-                if rect_a.overlaps(rect_b, tolerance):
-                    overlaps.append((node_a, node_b))
-
-        return overlaps
-
-    def find_missing_adjacencies(self, tolerance: float = 0.1) -> List[Tuple[str, str]]:
-        """
-        Find geometric adjacencies that are not represented in the graph.
-
-        Returns:
-            List of (node_id_a, node_id_b) tuples for adjacent shapes without edges
-        """
-        edge_set = set()
-        for a, b in self.edges:
-            edge_set.add((min(a, b), max(a, b)))
-
-        missing = []
-        nodes = list(self.shapes.keys())
-
-        for i, node_a in enumerate(nodes):
-            for node_b in nodes[i+1:]:
-                edge_key = (min(node_a, node_b), max(node_a, node_b))
-                if edge_key not in edge_set:
-                    rect_a = self.shapes[node_a]
-                    rect_b = self.shapes[node_b]
-                    if rect_a.is_adjacent_to(rect_b, tolerance):
-                        missing.append((node_a, node_b))
-
-        return missing
+        return sum(face_area(f) for f in self.faces())
 
     def bounding_box(self) -> Tuple[float, float, float, float]:
         """
@@ -266,128 +128,314 @@ class GraphShape:
         Returns:
             (min_x, min_y, max_x, max_y)
         """
-        if not self.shapes:
-            return (0, 0, 0, 0)
+        return faces_bounding_box(self.faces())
 
-        min_x = min(rect.origin.x for rect in self.shapes.values())
-        min_y = min(rect.origin.y for rect in self.shapes.values())
-        max_x = max(rect.origin.x + rect.width for rect in self.shapes.values())
-        max_y = max(rect.origin.y + rect.height for rect in self.shapes.values())
+    def get_face_by_label(self, label: str) -> Optional[Face]:
+        """Get Face by its label metadata."""
+        for face in self.faces():
+            if get_metadata(face, "label") == label:
+                return face
+        return None
 
-        return (min_x, min_y, max_x, max_y)
+    def get_vertex_by_label(self, label: str) -> Optional[Vertex]:
+        """Get graph Vertex by its label metadata."""
+        for vertex in self.vertices():
+            if get_metadata(vertex, "label") == label:
+                return vertex
+        return None
+
+    def get_neighbors(self, label: str) -> List[str]:
+        """
+        Get all node labels adjacent to given node.
+
+        Args:
+            label: Node label
+
+        Returns:
+            List of neighbor labels
+        """
+        vertex = self.get_vertex_by_label(label)
+        if not vertex:
+            return []
+
+        neighbors = []
+        for edge in self.edges():
+            edge_verts = Edge.Vertices(edge)
+            if len(edge_verts) != 2:
+                continue
+
+            v1, v2 = edge_verts
+            label1 = get_metadata(v1, "label")
+            label2 = get_metadata(v2, "label")
+
+            if label1 == label:
+                neighbors.append(label2)
+            elif label2 == label:
+                neighbors.append(label1)
+
+        return neighbors
+
+    def degree(self, label: str) -> int:
+        """Degree of node (number of neighbors)."""
+        return len(self.get_neighbors(label))
+
+    # -------------------------------------------------------------------------
+    # Validation
+    # -------------------------------------------------------------------------
+
+    def find_overlaps(self, tolerance: float = 0.01) -> List[Tuple[str, str]]:
+        """
+        Find all pairs of overlapping faces.
+
+        Returns:
+            List of (label1, label2) tuples for overlapping faces
+        """
+        overlaps = []
+        faces = self.faces()
+
+        for i, face1 in enumerate(faces):
+            for face2 in faces[i+1:]:
+                if faces_overlap(face1, face2, tolerance):
+                    label1 = get_metadata(face1, "label", "unknown")
+                    label2 = get_metadata(face2, "label", "unknown")
+                    overlaps.append((label1, label2))
+
+        return overlaps
+
+    def find_missing_adjacencies(self, tolerance: float = 0.01) -> List[Tuple[str, str]]:
+        """
+        Find geometric adjacencies not represented in graph.
+
+        Returns:
+            List of (label1, label2) tuples for faces that are adjacent
+            but don't have a corresponding graph edge
+        """
+        missing = []
+        faces = self.faces()
+
+        # Build set of existing edges from graph
+        existing_edges = set()
+        for edge in self.edges():
+            verts = Edge.Vertices(edge)
+            if len(verts) == 2:
+                label1 = get_metadata(verts[0], "label")
+                label2 = get_metadata(verts[1], "label")
+                if label1 and label2:
+                    existing_edges.add(tuple(sorted([label1, label2])))
+
+        # Check all face pairs
+        for i, face1 in enumerate(faces):
+            for face2 in faces[i+1:]:
+                if faces_adjacent(face1, face2, tolerance):
+                    label1 = get_metadata(face1, "label", "unknown")
+                    label2 = get_metadata(face2, "label", "unknown")
+                    edge_key = tuple(sorted([label1, label2]))
+
+                    if edge_key not in existing_edges:
+                        missing.append((label1, label2))
+
+        return missing
+
+    def validate(self, tolerance: float = 0.01) -> Tuple[bool, List[str]]:
+        """
+        Validate graph-shape consistency.
+
+        Checks:
+        1. No overlapping faces
+        2. Graph edges correspond to geometric adjacencies
+
+        Returns:
+            (is_valid, list_of_issues)
+        """
+        issues = []
+
+        # Check overlaps
+        overlaps = self.find_overlaps(tolerance)
+        for label1, label2 in overlaps:
+            issues.append(f"Overlapping faces: {label1} ↔ {label2}")
+
+        # Check that graph edges have geometric adjacency
+        for edge in self.edges():
+            verts = Edge.Vertices(edge)
+            if len(verts) != 2:
+                continue
+
+            label1 = get_metadata(verts[0], "label")
+            label2 = get_metadata(verts[1], "label")
+
+            if not label1 or not label2:
+                continue
+
+            # Find corresponding faces
+            face1 = self.get_face_by_label(label1)
+            face2 = self.get_face_by_label(label2)
+
+            if face1 and face2:
+                if not faces_adjacent(face1, face2, tolerance):
+                    issues.append(f"Graph edge without geometric adjacency: {label1} ↔ {label2}")
+
+        return (len(issues) == 0, issues)
 
     # -------------------------------------------------------------------------
     # Factory Methods
     # -------------------------------------------------------------------------
 
     @classmethod
-    def from_grid(cls, base: Rectangle, rows: int, cols: int) -> 'GraphShape':
+    def from_faces_and_adjacencies(
+        cls,
+        faces: List[Face],
+        adjacencies: List[Tuple[str, str]]
+    ) -> "GraphShape":
         """
-        Create GraphShape from grid subdivision of base rectangle.
+        Create GraphShape from faces and adjacency pairs.
 
         Args:
-            base: Rectangle to subdivide
-            rows: Number of rows
-            cols: Number of columns
+            faces: List of Face objects (must have 'label' metadata)
+            adjacencies: List of (label1, label2) adjacency tuples
 
         Returns:
-            GraphShape with grid topology
+            GraphShape instance
+
+        Example:
+            >>> faces = [
+            ...     rectangular_face(5, 4, label="Kitchen"),
+            ...     rectangular_face(6, 5, label="Living"),
+            ... ]
+            >>> adjacencies = [("Kitchen", "Living")]
+            >>> gs = GraphShape.from_faces_and_adjacencies(faces, adjacencies)
         """
-        grid = base.subdivide_grid(rows, cols)
+        cluster = Cluster.ByTopologies(faces)
+        graph = graph_from_faces_and_adjacencies(faces, adjacencies)
 
-        shapes = {}
-        edges = []
+        return cls(cluster=cluster, graph=graph)
 
-        # Create nodes with cell_[row]_[col] naming
-        for i in range(rows):
-            for j in range(cols):
-                node_id = f"cell_{i}_{j}"
-                shapes[node_id] = grid[i][j]
+    @classmethod
+    def from_grid(
+        cls,
+        base_width: float,
+        base_height: float,
+        rows: int,
+        cols: int,
+        origin: Tuple[float, float] = (0.0, 0.0)
+    ) -> "GraphShape":
+        """
+        Create GraphShape from grid subdivision.
 
-        # Create edges for adjacent cells
-        for i in range(rows):
-            for j in range(cols):
-                current = f"cell_{i}_{j}"
+        Subdivides a rectangle into rows×cols cells with mesh topology.
 
-                # Right neighbor
-                if j < cols - 1:
-                    right = f"cell_{i}_{j+1}"
-                    edges.append((current, right))
+        Args:
+            base_width: Width of base rectangle
+            base_height: Height of base rectangle
+            rows: Number of rows
+            cols: Number of columns
+            origin: Bottom-left corner of base rectangle
 
-                # Top neighbor
-                if i < rows - 1:
-                    top = f"cell_{i+1}_{j}"
-                    edges.append((current, top))
+        Returns:
+            GraphShape with grid layout
 
-        return cls(shapes=shapes, edges=edges)
+        Example:
+            >>> gs = GraphShape.from_grid(20, 15, rows=3, cols=3)
+        """
+        cell_width = base_width / cols
+        cell_height = base_height / rows
+
+        faces = []
+        adjacencies = []
+
+        x0, y0 = origin
+
+        for r in range(rows):
+            for c in range(cols):
+                label = f"cell_{r}_{c}"
+
+                face = rectangular_face(
+                    cell_width,
+                    cell_height,
+                    origin=(x0 + c * cell_width, y0 + r * cell_height),
+                    label=label,
+                    row=r,
+                    col=c
+                )
+                faces.append(face)
+
+                # Add adjacencies
+                if c > 0:  # Left neighbor
+                    adjacencies.append((label, f"cell_{r}_{c-1}"))
+                if r > 0:  # Bottom neighbor
+                    adjacencies.append((label, f"cell_{r-1}_{c}"))
+
+        return cls.from_faces_and_adjacencies(faces, adjacencies)
 
     @classmethod
     def from_horizontal_split(
         cls,
-        base: Rectangle,
+        base_width: float,
+        base_height: float,
         ratios: List[float],
-        labels: Optional[List[str]] = None
-    ) -> 'GraphShape':
+        labels: Optional[List[str]] = None,
+        origin: Tuple[float, float] = (0.0, 0.0)
+    ) -> "GraphShape":
         """
         Create GraphShape from horizontal subdivision.
 
+        Splits a rectangle horizontally into sections with linear topology.
+
         Args:
-            base: Rectangle to subdivide
-            ratios: List of width ratios (should sum to ~1.0)
-            labels: Optional list of node labels (default: n0, n1, ...)
+            base_width: Width of base rectangle
+            base_height: Height of base rectangle
+            ratios: Width ratios for each section (must sum to ~1.0)
+            labels: Optional labels for each section
+            origin: Bottom-left corner of base rectangle
 
         Returns:
-            GraphShape with linear chain topology
+            GraphShape with linear layout
+
+        Example:
+            >>> gs = GraphShape.from_horizontal_split(
+            ...     30, 10,
+            ...     ratios=[0.3, 0.4, 0.3],
+            ...     labels=["Entrance", "Living", "Bedroom"]
+            ... )
         """
+        # Normalize ratios
+        total = sum(ratios)
+        ratios = [r / total for r in ratios]
+
         if labels is None:
-            labels = [f"n{i}" for i in range(len(ratios))]
+            labels = [f"section_{i}" for i in range(len(ratios))]
 
         if len(labels) != len(ratios):
             raise ValueError("Number of labels must match number of ratios")
 
-        # Normalize ratios
-        total = sum(ratios)
-        normalized = [r / total for r in ratios]
+        faces = []
+        adjacencies = []
 
-        # Create shapes
-        shapes = {}
-        current_x = base.origin.x
+        x0, y0 = origin
+        current_x = x0
 
-        for i, (ratio, label) in enumerate(zip(normalized, labels)):
-            width = base.width * ratio
-            rect = Rectangle(
-                width=width,
-                height=base.height,
-                origin=Point(current_x, base.origin.y)
+        for i, (ratio, label) in enumerate(zip(ratios, labels)):
+            section_width = base_width * ratio
+
+            face = rectangular_face(
+                section_width,
+                base_height,
+                origin=(current_x, y0),
+                label=label,
+                section_index=i
             )
-            shapes[label] = rect
-            current_x += width
+            faces.append(face)
 
-        # Create linear chain edges
-        edges = []
-        for i in range(len(labels) - 1):
-            edges.append((labels[i], labels[i+1]))
+            # Add adjacency to previous section
+            if i > 0:
+                adjacencies.append((labels[i-1], label))
 
-        return cls(shapes=shapes, edges=edges)
+            current_x += section_width
 
-    # -------------------------------------------------------------------------
-    # Serialization
-    # -------------------------------------------------------------------------
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            'shapes': {
-                node_id: rect.to_dict()
-                for node_id, rect in self.shapes.items()
-            },
-            'edges': self.edges,
-            'metadata': self.metadata
-        }
+        return cls.from_faces_and_adjacencies(faces, adjacencies)
 
 
 # =============================================================================
-# TRANSFORMATION RULES
+# TRANSFORMATION RULES (To be implemented in future notebooks)
 # =============================================================================
 
 @dataclass
@@ -405,6 +453,9 @@ class GraphShapeRule:
         >>> rule = RuleLibrary.split_horizontal()
         >>> # Apply to node 'n0' in graphshape
         >>> new_gs = rule.apply(graphshape, 'n0')
+
+    Note: Transformation rules will be implemented using TopologicPy Face
+    subdivision methods in future notebooks.
     """
     name: str
     description: str
@@ -412,36 +463,32 @@ class GraphShapeRule:
     transform: Callable[[GraphShape, str, Dict], GraphShape]
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def can_apply(self, gs: GraphShape, node_id: str) -> bool:
+    def can_apply(self, gs: GraphShape, node_label: str) -> bool:
         """Check if rule can be applied to given node."""
-        if node_id not in gs.shapes:
+        if not gs.get_face_by_label(node_label):
             return False
-        return self.pattern(gs, node_id)
+        return self.pattern(gs, node_label)
 
-    def apply(self, gs: GraphShape, node_id: str, **params) -> GraphShape:
+    def apply(self, gs: GraphShape, node_label: str, **params) -> GraphShape:
         """
         Apply transformation to given node.
 
         Args:
             gs: GraphShape to transform
-            node_id: Target node to transform
+            node_label: Target node label to transform
             **params: Rule-specific parameters (e.g., ratio=0.5)
 
         Returns:
             New GraphShape after transformation
         """
-        if not self.can_apply(gs, node_id):
+        if not self.can_apply(gs, node_label):
             raise ValueError(
-                f"Rule '{self.name}' cannot be applied to node '{node_id}'. "
+                f"Rule '{self.name}' cannot be applied to node '{node_label}'. "
                 f"Pattern check failed."
             )
 
-        return self.transform(gs, node_id, params)
+        return self.transform(gs, node_label, params)
 
-
-# =============================================================================
-# RULE LIBRARY
-# =============================================================================
 
 class RuleLibrary:
     """
@@ -449,8 +496,11 @@ class RuleLibrary:
 
     All rules follow the pattern:
     1. Graph transformation (add/remove/merge nodes and edges)
-    2. Shape transformation (subdivide/merge/adjust rectangles)
+    2. Shape transformation (subdivide/merge/adjust Faces)
     3. Maintain consistency (graph structure = shape adjacency)
+
+    Note: Rule implementations will be added in future notebooks.
+    They will use TopologicPy Face methods for geometric operations.
     """
 
     @staticmethod
@@ -464,65 +514,23 @@ class RuleLibrary:
             Reconnect neighbors: each neighbor connects to BOTH new nodes
 
         Shape transformation:
-            Rectangle → subdivide_horizontal(ratio)
+            Face → split horizontally using TopologicPy methods
 
         Args:
             default_ratio: Default split position (0 < ratio < 1)
 
-        Examples:
-            >>> rule = RuleLibrary.split_horizontal(0.4)
-            >>> new_gs = rule.apply(gs, 'n0', ratio=0.4)
-            # n0 is split into n0_L (40%) and n0_R (60%)
+        Note: Full implementation requires TopologicPy Face splitting methods.
+        To be implemented in future notebooks.
         """
-        def pattern(gs: GraphShape, node_id: str) -> bool:
+        def pattern(gs: GraphShape, node_label: str) -> bool:
             # Can split any node
             return True
 
-        def transform(gs: GraphShape, node_id: str, params: Dict) -> GraphShape:
-            ratio = params.get('ratio', default_ratio)
-
-            # Get original rectangle and neighbors
-            rect = gs.shapes[node_id]
-            neighbors = gs.get_neighbors(node_id)
-
-            # SHAPE TRANSFORMATION: Subdivide rectangle
-            left_rect, right_rect = rect.subdivide_horizontal(ratio)
-
-            # GRAPH TRANSFORMATION: Create new nodes and edges
-            left_id = f"{node_id}_L"
-            right_id = f"{node_id}_R"
-
-            # Build new shapes dict
-            new_shapes = gs.shapes.copy()
-            del new_shapes[node_id]
-            new_shapes[left_id] = left_rect
-            new_shapes[right_id] = right_rect
-
-            # Build new edges list
-            new_edges = []
-
-            # Add edge between split nodes
-            new_edges.append((left_id, right_id))
-
-            # Reconnect neighbors to BOTH new nodes
-            for neighbor in neighbors:
-                new_edges.append((left_id, neighbor))
-                new_edges.append((right_id, neighbor))
-
-            # Keep all other edges (that don't involve node_id)
-            for a, b in gs.edges:
-                if a != node_id and b != node_id:
-                    new_edges.append((a, b))
-
-            return GraphShape(
-                shapes=new_shapes,
-                edges=new_edges,
-                metadata={
-                    **gs.metadata,
-                    'last_rule': 'split_horizontal',
-                    'split_node': node_id,
-                    'split_ratio': ratio
-                }
+        def transform(gs: GraphShape, node_label: str, params: Dict) -> GraphShape:
+            # TODO: Implement using TopologicPy Face splitting
+            raise NotImplementedError(
+                "Rule transformations to be implemented in future notebooks "
+                "using TopologicPy Face subdivision methods"
             )
 
         return GraphShapeRule(
@@ -532,260 +540,6 @@ class RuleLibrary:
             transform=transform,
             metadata={'type': 'subdivision', 'direction': 'horizontal'}
         )
-
-    @staticmethod
-    def split_vertical(default_ratio: float = 0.5) -> GraphShapeRule:
-        """
-        Split a node vertically (bottom | top).
-
-        Similar to split_horizontal but divides along vertical axis.
-        """
-        def pattern(gs: GraphShape, node_id: str) -> bool:
-            return True
-
-        def transform(gs: GraphShape, node_id: str, params: Dict) -> GraphShape:
-            ratio = params.get('ratio', default_ratio)
-
-            rect = gs.shapes[node_id]
-            neighbors = gs.get_neighbors(node_id)
-
-            # SHAPE: Subdivide vertically
-            bottom_rect, top_rect = rect.subdivide_vertical(ratio)
-
-            # GRAPH: Create new nodes
-            bottom_id = f"{node_id}_B"
-            top_id = f"{node_id}_T"
-
-            new_shapes = gs.shapes.copy()
-            del new_shapes[node_id]
-            new_shapes[bottom_id] = bottom_rect
-            new_shapes[top_id] = top_rect
-
-            new_edges = []
-            new_edges.append((bottom_id, top_id))
-
-            for neighbor in neighbors:
-                new_edges.append((bottom_id, neighbor))
-                new_edges.append((top_id, neighbor))
-
-            for a, b in gs.edges:
-                if a != node_id and b != node_id:
-                    new_edges.append((a, b))
-
-            return GraphShape(
-                shapes=new_shapes,
-                edges=new_edges,
-                metadata={
-                    **gs.metadata,
-                    'last_rule': 'split_vertical',
-                    'split_node': node_id,
-                    'split_ratio': ratio
-                }
-            )
-
-        return GraphShapeRule(
-            name=f"split_vertical_{default_ratio}",
-            description=f"Split node vertically at ratio {default_ratio}",
-            pattern=pattern,
-            transform=transform,
-            metadata={'type': 'subdivision', 'direction': 'vertical'}
-        )
-
-    @staticmethod
-    def merge_adjacent() -> GraphShapeRule:
-        """
-        Merge two adjacent nodes into one.
-
-        Graph transformation:
-            n0 + n1 → n0_n1
-            Remove edge (n0, n1)
-            Merge neighbor connections
-
-        Shape transformation:
-            Bounding box of both rectangles
-
-        Note: Requires selecting TWO nodes. Uses 'target_neighbor' parameter.
-        """
-        def pattern(gs: GraphShape, node_id: str) -> bool:
-            # Can merge if node has at least one neighbor
-            return len(gs.get_neighbors(node_id)) > 0
-
-        def transform(gs: GraphShape, node_id: str, params: Dict) -> GraphShape:
-            # Get neighbor to merge with
-            neighbor_id = params.get('neighbor_id')
-            if neighbor_id is None:
-                # Default: merge with first neighbor
-                neighbors = gs.get_neighbors(node_id)
-                if not neighbors:
-                    raise ValueError(f"Node {node_id} has no neighbors to merge with")
-                neighbor_id = neighbors[0]
-
-            if neighbor_id not in gs.shapes:
-                raise ValueError(f"Neighbor {neighbor_id} does not exist")
-
-            # Check if they are actually adjacent
-            if neighbor_id not in gs.get_neighbors(node_id):
-                raise ValueError(f"Nodes {node_id} and {neighbor_id} are not adjacent")
-
-            rect_a = gs.shapes[node_id]
-            rect_b = gs.shapes[neighbor_id]
-
-            # SHAPE: Merge into bounding box
-            merged_rect = merge_rectangles_bounding_box([rect_a, rect_b])
-
-            # GRAPH: Create merged node
-            merged_id = f"{node_id}+{neighbor_id}"
-
-            new_shapes = gs.shapes.copy()
-            del new_shapes[node_id]
-            del new_shapes[neighbor_id]
-            new_shapes[merged_id] = merged_rect
-
-            # Build new edges
-            new_edges = []
-            for a, b in gs.edges:
-                # Replace references to old nodes with merged node
-                new_a = merged_id if a in [node_id, neighbor_id] else a
-                new_b = merged_id if b in [node_id, neighbor_id] else b
-
-                # Skip self-loops and duplicates
-                if new_a != new_b:
-                    edge = tuple(sorted([new_a, new_b]))  # Normalize
-                    if edge not in [tuple(sorted([e[0], e[1]])) for e in new_edges]:
-                        new_edges.append((new_a, new_b))
-
-            return GraphShape(
-                shapes=new_shapes,
-                edges=new_edges,
-                metadata={
-                    **gs.metadata,
-                    'last_rule': 'merge_adjacent',
-                    'merged_nodes': [node_id, neighbor_id]
-                }
-            )
-
-        return GraphShapeRule(
-            name="merge_adjacent",
-            description="Merge two adjacent nodes into bounding box",
-            pattern=pattern,
-            transform=transform,
-            metadata={'type': 'merge'}
-        )
-
-    @staticmethod
-    def split_grid(rows: int = 2, cols: int = 2) -> GraphShapeRule:
-        """
-        Split a node into uniform grid.
-
-        Graph transformation:
-            n0 → n0_r0c0, n0_r0c1, ..., n0_r(rows-1)c(cols-1)
-            Add edges for grid adjacencies (4-connectivity)
-
-        Shape transformation:
-            Rectangle → subdivide_grid(rows, cols)
-        """
-        def pattern(gs: GraphShape, node_id: str) -> bool:
-            return True
-
-        def transform(gs: GraphShape, node_id: str, params: Dict) -> GraphShape:
-            actual_rows = params.get('rows', rows)
-            actual_cols = params.get('cols', cols)
-
-            rect = gs.shapes[node_id]
-            neighbors = gs.get_neighbors(node_id)
-
-            # SHAPE: Subdivide into grid
-            grid_rects = rect.subdivide_grid(actual_rows, actual_cols)
-
-            # GRAPH: Create grid nodes and edges
-            new_shapes = gs.shapes.copy()
-            del new_shapes[node_id]
-
-            grid_nodes = {}  # (row, col) → node_id
-            for row in range(actual_rows):
-                for col in range(actual_cols):
-                    cell_id = f"{node_id}_r{row}c{col}"
-                    new_shapes[cell_id] = grid_rects[row][col]
-                    grid_nodes[(row, col)] = cell_id
-
-            # Build new edges
-            new_edges = []
-
-            # Grid internal edges (4-connectivity)
-            for row in range(actual_rows):
-                for col in range(actual_cols):
-                    current_id = grid_nodes[(row, col)]
-
-                    # Right neighbor
-                    if col + 1 < actual_cols:
-                        right_id = grid_nodes[(row, col + 1)]
-                        new_edges.append((current_id, right_id))
-
-                    # Bottom neighbor
-                    if row + 1 < actual_rows:
-                        bottom_id = grid_nodes[(row + 1, col)]
-                        new_edges.append((current_id, bottom_id))
-
-            # Connect border cells to original neighbors
-            for row in range(actual_rows):
-                for col in range(actual_cols):
-                    # Cells on the border connect to all original neighbors
-                    # (This is simplified - could be more sophisticated)
-                    cell_id = grid_nodes[(row, col)]
-                    for neighbor in neighbors:
-                        new_edges.append((cell_id, neighbor))
-
-            # Keep all other edges
-            for a, b in gs.edges:
-                if a != node_id and b != node_id:
-                    new_edges.append((a, b))
-
-            return GraphShape(
-                shapes=new_shapes,
-                edges=new_edges,
-                metadata={
-                    **gs.metadata,
-                    'last_rule': 'split_grid',
-                    'grid_size': (actual_rows, actual_cols)
-                }
-            )
-
-        return GraphShapeRule(
-            name=f"split_grid_{rows}x{cols}",
-            description=f"Split node into {rows}×{cols} grid",
-            pattern=pattern,
-            transform=transform,
-            metadata={'type': 'subdivision', 'grid': (rows, cols)}
-        )
-
-
-# =============================================================================
-# RULE SEQUENCES & COMPOSITION
-# =============================================================================
-
-class RuleSequence:
-    """
-    Sequence of rules to apply in order.
-
-    Allows composing multiple transformations into higher-level operations.
-    """
-
-    def __init__(self, rules: List[Tuple[GraphShapeRule, str, Dict]]):
-        """
-        Args:
-            rules: List of (rule, target_node_id, params) tuples
-        """
-        self.rules = rules
-
-    def apply(self, gs: GraphShape) -> GraphShape:
-        """Apply all rules in sequence."""
-        current = gs
-        for rule, node_id, params in self.rules:
-            current = rule.apply(current, node_id, **params)
-        return current
-
-    def __len__(self):
-        return len(self.rules)
 
 
 # =============================================================================
@@ -799,16 +553,22 @@ def apply_rule_to_all_nodes(gs: GraphShape, rule: GraphShapeRule, **params) -> G
     Useful for batch transformations like "split all rooms horizontally".
     """
     current = gs
-    for node_id in list(gs.shapes.keys()):
-        if rule.can_apply(current, node_id):
-            current = rule.apply(current, node_id, **params)
+    all_labels = [get_metadata(f, "label") for f in gs.faces()]
+
+    for label in all_labels:
+        if label and rule.can_apply(current, label):
+            current = rule.apply(current, label, **params)
+
     return current
 
 
 def find_applicable_nodes(gs: GraphShape, rule: GraphShapeRule) -> List[str]:
-    """Find all nodes where rule can be applied."""
-    return [
-        node_id
-        for node_id in gs.shapes.keys()
-        if rule.can_apply(gs, node_id)
-    ]
+    """Find all node labels where rule can be applied."""
+    applicable = []
+
+    for face in gs.faces():
+        label = get_metadata(face, "label")
+        if label and rule.can_apply(gs, label):
+            applicable.append(label)
+
+    return applicable
