@@ -750,3 +750,332 @@ Track completion by checking off actions. Current status:
 
 **Last Updated**: 2025-10-23
 **Version**: 1.0
+
+---
+
+## Phase 3: Shape Grammar Engine (NEW - 2025-12-29)
+
+### Module 7: Core Data Structures (Week 1 - 5 days)
+
+#### Action 35: LayoutState Foundation
+- [ ] Create `src/grammar/core.py`
+- [ ] Implement `Phase` enum (BUBBLE, RECTANGLES, ARRANGED, REFINED)
+- [ ] Implement `EdgeType` enum (ADJACENCY, ALIGNMENT)
+- [ ] Implement `Point` dataclass (x, y)
+- [ ] Implement `Circle` dataclass (center, radius)
+- [ ] Implement `Rectangle` dataclass (center, width, height, rotation)
+- [ ] Write unit tests for all geometry classes
+
+#### Action 36: Shape & LayoutState Classes
+- [ ] Implement `Shape` dataclass (id, geometry, room_type, target_area, computed_area)
+- [ ] Implement `LayoutEdge` dataclass (source_id, target_id, edge_type)
+- [ ] Implement `LayoutState` dataclass (phase, shapes, edges, is_valid)
+  - [ ] Methods: `add_shape()`, `add_edge()`, `validate()`, `bounds()`
+- [ ] Write tests: create state, add shapes, validate
+- [ ] Test serialization (to_dict, from_dict)
+
+#### Action 37: Conversion Layer - LayoutState ↔ GraphShape
+- [ ] Create `src/grammar/converters.py`
+- [ ] Implement `layout_state_to_graphshape(state) -> GraphShape`
+  - [ ] Convert Circle/Rectangle → TopologicPy Face
+  - [ ] Create Cluster from faces
+  - [ ] Create Graph from edges + centroids
+- [ ] Implement `graphshape_to_layout_state(gs) -> LayoutState`
+  - [ ] Extract faces → Rectangle geometry
+  - [ ] Extract graph edges → LayoutEdge
+- [ ] Test round-trip: LayoutState → GraphShape → LayoutState
+- [ ] Verify geometry preservation (within tolerance)
+
+#### Action 38: Bubble Diagram Integration
+- [ ] Create `create_initial_state(circles: Dict, edges: List) -> LayoutState`
+  - [ ] Convert CircleNode → Shape with Circle geometry
+  - [ ] Convert edge list → LayoutEdge
+  - [ ] Set phase = Phase.BUBBLE
+- [ ] Test with Phase2_BubbleDiagram output
+  - [ ] Load circles from `run_circle_packing()`
+  - [ ] Create LayoutState
+  - [ ] Verify all data preserved
+
+#### Action 39: Visualization Integration Test
+- [ ] Convert LayoutState (circles) → GraphShape
+- [ ] Visualize with TopologicPy Plotly
+  - [ ] `Plotly.Show(gs.cluster, gs.graph, renderer="notebook")`
+  - [ ] Export to HTML: `renderer="browser", filepath="..."`
+- [ ] Verify: circles render correctly, edges visible
+
+---
+
+### Module 8: Phase 1 Rules - Circle → Rectangle (Week 2 - 5 days)
+
+#### Action 40: Rule Base Classes
+- [ ] Create `src/grammar/rules.py`
+- [ ] Implement `Match` dataclass (shape_ids, score, metadata)
+- [ ] Implement `RuleResult` dataclass (success, modified_shapes, message)
+- [ ] Implement `Rule` base class (abstract)
+  - [ ] Properties: name, phase, priority
+  - [ ] Methods: `match(state) -> List[Match]`, `apply(state, match) -> RuleResult`
+  - [ ] Method: `can_apply(state) -> bool`
+
+#### Action 41: Rule Registry
+- [ ] Implement `RuleRegistry` class
+  - [ ] Methods: `register(rule)`, `get_for_phase(phase)`, `get_all()`
+  - [ ] Priority sorting
+- [ ] Write tests: register rules, query by phase, priority order
+
+#### Action 42: CircleToRectangle Rule Implementation
+- [ ] Create `src/grammar/phase1_rules.py`
+- [ ] Implement `get_default_aspect_ratio(room_type) -> float`
+  - [ ] Living: 1.5, Bedroom: 1.3, Kitchen: 1.2, Bathroom: 1.0, etc.
+- [ ] Implement `CircleToRectangleRule(Rule)`
+  - [ ] `match()`: Find all Circle shapes
+  - [ ] `apply()`: Convert to Rectangle preserving area
+    - [ ] Compute width/height from area + aspect ratio
+    - [ ] Center at circle center
+    - [ ] Set rotation = 0
+- [ ] Write tests:
+  - [ ] Convert single circle → verify area preserved
+  - [ ] Convert 10 circles → verify all converted
+  - [ ] Test different room types → verify aspect ratios
+
+#### Action 43: Engine Foundation
+- [ ] Create `src/grammar/engine.py`
+- [ ] Implement `EngineConfig` dataclass (max_iterations, tolerances, verbose)
+- [ ] Implement `ExecutionResult` dataclass (success, final_state, iterations, rules_applied, validation_issues)
+- [ ] Implement `ShapeGrammarEngine` class skeleton
+  - [ ] `__init__(config)`: Setup registry, callbacks
+  - [ ] `_setup_default_rules()`: Register Phase 1 rules
+  - [ ] `register_rule(rule)`
+  - [ ] `create_initial_state(circles, edges)`: Wrapper
+  - [ ] `step(state) -> (bool, str)`: Apply single rule
+
+#### Action 44: Phase 1 Execution & Testing
+- [ ] Implement `_run_hybrid()` Phase 1 logic
+  - [ ] Apply CircleToRectangle to all circles
+  - [ ] Transition phase: BUBBLE → RECTANGLES
+  - [ ] Validation check
+- [ ] Test with mock data:
+  - [ ] 3 circles → 3 rectangles
+  - [ ] 10 circles → 10 rectangles
+- [ ] Test with Phase2 bubble diagram output
+  - [ ] Load circles from `run_circle_packing()`
+  - [ ] Run Phase 1
+  - [ ] Verify all rectangles, areas preserved
+- [ ] Visualize:
+  - [ ] Before: circles (Plotly)
+  - [ ] After: rectangles (Plotly)
+  - [ ] Export both to HTML
+
+---
+
+### Module 9: Phase 2 Rules - Rectangle Arrangement (Week 3 - 5 days)
+
+#### Action 45: Edge Finding Algorithm
+- [ ] Create `src/grammar/phase2_rules.py`
+- [ ] Implement `find_closest_edges(rect_a: Rectangle, rect_b: Rectangle) -> (edge_a, edge_b)`
+  - [ ] Get 4 edges of each rectangle
+  - [ ] Compute pairwise distances (midpoint-to-midpoint)
+  - [ ] Return closest pair
+- [ ] Write tests:
+  - [ ] Two horizontal rectangles → vertical edges closest
+  - [ ] Rotated rectangles → verify correct edges found
+
+#### Action 46: Alignment Computation
+- [ ] Implement `compute_edge_angle(edge) -> float`
+  - [ ] Return angle in degrees (0-360)
+- [ ] Implement `compute_rotation_to_align(edge_a, edge_b) -> float`
+  - [ ] Return rotation needed to make edges parallel
+- [ ] Implement `compute_translation_to_align(edge_a, edge_b) -> Point`
+  - [ ] Return offset to make edges collinear
+- [ ] Write tests: verify angle/translation calculations
+
+#### Action 47: AlignAdjacentRectangles Rule
+- [ ] Implement `AlignAdjacentRectanglesRule(Rule)`
+  - [ ] `match()`: Find pairs with adjacency edges
+  - [ ] Scoring: closer pairs = higher score
+  - [ ] `apply()`:
+    - [ ] Find closest edges
+    - [ ] Compute rotation
+    - [ ] Rotate rect_b
+    - [ ] Compute translation
+    - [ ] Translate rect_b
+    - [ ] Check overlap → separate if needed
+- [ ] Write tests:
+  - [ ] Align two random rectangles → verify shared edge
+  - [ ] Test overlap detection → verify separation
+
+#### Action 48: Overlap Detection & Resolution
+- [ ] Implement `rectangles_overlap(rect_a, rect_b) -> bool`
+  - [ ] Use SAT (Separating Axis Theorem) for rotated rects
+  - [ ] Or convert to GraphShape → use TopologicPy Intersect()
+- [ ] Implement `compute_separation_vector(rect_a, rect_b) -> Point`
+  - [ ] Return vector to separate by min distance
+- [ ] Write tests:
+  - [ ] Overlapping rects → returns True
+  - [ ] Touching rects → returns False
+  - [ ] Test separation vector → verify correct direction
+
+#### Action 49: Iterative Arrangement Engine
+- [ ] Implement `_run_hybrid()` Phase 2 logic
+  - [ ] Loop: apply AlignAdjacentRectangles
+  - [ ] Priority: closest pairs first (score-based)
+  - [ ] Convergence: no position changes > threshold
+  - [ ] Max iterations: 100
+- [ ] Test with 4-room graph (2×2 grid topology)
+  - [ ] Verify all aligned
+  - [ ] Measure iterations to convergence
+- [ ] Test with 8-room graph (complex topology)
+  - [ ] Verify final layout valid
+  - [ ] Check overlaps, gaps
+
+---
+
+### Module 10: Refinement & Validation (Week 4 - 5 days)
+
+#### Action 50: FillGapBetweenRectangles Rule
+- [ ] Implement `compute_gap(rect_a, rect_b) -> float`
+  - [ ] Distance between closest points on edges
+- [ ] Implement `FillGapBetweenRectanglesRule(Rule)`
+  - [ ] `match()`: Find pairs with gaps 0.01m - 0.5m
+  - [ ] `apply()`: Translate rect_b to close gap
+- [ ] Write tests:
+  - [ ] Detect 0.2m gap → close to 0
+  - [ ] Verify no overlap after closing
+
+#### Action 51: Comprehensive Validation
+- [ ] Implement `validate_layout_state(state) -> Dict[str, List[str]]`
+  - [ ] Convert to GraphShape
+  - [ ] Use `gs.find_overlaps()`
+  - [ ] Use `gs.find_missing_adjacencies()`
+  - [ ] Check area preservation (all shapes)
+  - [ ] Return structured issues dict
+- [ ] Write validation report formatter
+  - [ ] Print human-readable summary
+  - [ ] Export JSON report
+
+#### Action 52: Metrics & Quality Scoring
+- [ ] Implement `compute_layout_metrics(state) -> Dict`
+  - [ ] Total area, avg room area
+  - [ ] Overlap count, gap count
+  - [ ] Alignment quality score
+  - [ ] Compactness metric (bounding box ratio)
+  - [ ] Aspect ratio stats (mean, std)
+- [ ] Create metrics visualization
+  - [ ] Bar charts for area distribution
+  - [ ] Histogram for aspect ratios
+  - [ ] Plotly dashboard
+
+#### Action 53: End-to-End Testing
+- [ ] Test suite: 1BR, 2BR, 3BR, 4BR apartments
+  - [ ] Generate graphs from GraphRAG
+  - [ ] Run bubble packing
+  - [ ] Run shape grammar engine
+  - [ ] Validate final layouts
+- [ ] Success rate measurement
+  - [ ] Count valid vs invalid layouts
+  - [ ] Target: 80%+ success rate
+- [ ] Performance benchmarking
+  - [ ] 5 rooms: < 5s
+  - [ ] 10 rooms: < 30s
+  - [ ] 15 rooms: < 60s
+
+#### Action 54: Failure Analysis
+- [ ] Identify common failure modes
+  - [ ] Document impossible topologies
+  - [ ] Document convergence issues
+- [ ] Create fallback strategies
+  - [ ] Relaxed constraints for difficult cases
+  - [ ] Manual intervention hooks
+- [ ] Update known limitations in documentation
+
+---
+
+### Module 11: Visualization & Integration (Week 5 - 5 days)
+
+#### Action 55: Step-by-Step Visualization
+- [ ] Implement `visualize_transformation_steps(circles, edges, output_dir)`
+  - [ ] Callback: save HTML after each rule application
+  - [ ] Filename: `step_NNN_rulename.html`
+  - [ ] Use TopologicPy Plotly with `renderer="browser"`
+- [ ] Test: generate 50-step transformation
+  - [ ] Verify all steps saved
+  - [ ] Check HTML files render correctly
+
+#### Action 56: Comparison Dashboards
+- [ ] Implement `create_comparison_visualization(states: List[LayoutState])`
+  - [ ] Side-by-side Plotly subplots
+  - [ ] Shared axes for comparison
+  - [ ] Metrics overlay (area, gaps, etc.)
+- [ ] Create before/after comparison
+  - [ ] Bubble diagram vs final layout
+  - [ ] Export to single HTML file
+
+#### Action 57: Variation Generator
+- [ ] Implement `generate_layout_variations(circles, edges, n=10) -> List[LayoutState]`
+  - [ ] Different random seeds for arrangement
+  - [ ] Different aspect ratio distributions
+  - [ ] Different alignment priorities
+- [ ] Create variation gallery visualization
+  - [ ] Grid of 10 layouts (2×5 or 3×4)
+  - [ ] Plotly subplots
+  - [ ] Export to `variations_gallery.html`
+
+#### Action 58: GraphRAG Integration (End-to-End)
+- [ ] Create `notebooks/Phase3_EndToEnd.ipynb`
+  - [ ] Section 1: GraphRAG (Phase 1) → generate graph
+  - [ ] Section 2: Bubble Diagram (Phase 2) → circle packing
+  - [ ] Section 3: Shape Grammar (Phase 3) → transformation
+  - [ ] Section 4: Visualization → Plotly renderings
+  - [ ] Section 5: Export → save layouts
+- [ ] Test with 5 apartment types
+  - [ ] Studio, 1BR, 2BR, 3BR, 4BR
+  - [ ] Generate and visualize all
+  - [ ] Save gallery of results
+
+#### Action 59: Documentation & Polish
+- [ ] Update `README.md`
+  - [ ] Add Phase 3 overview
+  - [ ] Add code examples
+  - [ ] Add gallery of example outputs
+- [ ] Create `PHASE3_GUIDE.md`
+  - [ ] Detailed API documentation
+  - [ ] Usage examples
+  - [ ] Troubleshooting guide
+- [ ] Update `DEVELOPMENT_PLAN.md`
+  - [ ] Mark Phase 3 complete
+  - [ ] Outline Phase 4 (3D extrusion)
+
+---
+
+## Phase 3 Validation Checklist
+
+### Functional Requirements
+- [ ] ✅ Converts all circles to rectangles (100% success)
+- [ ] ✅ Preserves area within 10% tolerance
+- [ ] ✅ Aligns adjacent rectangles (shared edges within 0.5m)
+- [ ] ✅ No overlaps in final layout
+- [ ] ✅ Gaps < 0.5m between adjacent rooms
+- [ ] ✅ Converges in < 100 iterations (10-room layout)
+
+### Quality Requirements
+- [ ] ✅ 80%+ layouts pass full validation
+- [ ] ✅ Aspect ratios reasonable (1.0 - 2.0)
+- [ ] ✅ Layouts visually plausible
+- [ ] ✅ Can generate 10+ variations per graph
+
+### Performance Requirements
+- [ ] ✅ 5-room layout: < 5 seconds
+- [ ] ✅ 10-room layout: < 30 seconds
+- [ ] ✅ 15-room layout: < 60 seconds
+
+### Code Quality
+- [ ] ✅ 90%+ test coverage
+- [ ] ✅ All unit tests pass
+- [ ] ✅ Docstrings on all public APIs
+- [ ] ✅ Type hints throughout
+- [ ] ✅ No linting errors
+
+---
+
+**Phase 3 Progress**: 0/25 actions completed
+**Estimated Duration**: 5 weeks
+**Last Updated**: 2025-12-29
